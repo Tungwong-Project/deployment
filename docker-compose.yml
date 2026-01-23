@@ -1,0 +1,165 @@
+version: "3.8"
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:14
+    restart: unless-stopped
+    container_name: tungwong-postgres
+    environment:
+      POSTGRES_USER: ${DB_USER:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+      POSTGRES_DB: ${DB_NAME:-tungwong_db}
+    ports:
+      - "${DB_PORT:-5433}:5432"
+    networks:
+      - tungwong-network
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./tungwong-auth-management-api/db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-postgres} -d ${DB_NAME:-tungwong_db} -h localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Auth Management API
+  auth-api:
+    build:
+      context: ./tungwong-auth-management-api
+      dockerfile: Dockerfile
+    image: tungwong-auth-management-api:latest
+    container_name: tungwong-auth-api
+    ports:
+      - "3000:3000"
+    networks:
+      - tungwong-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PORT=3000
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=${DB_NAME:-tungwong_db}
+    env_file:
+      - ./tungwong-auth-management-api/.env
+    volumes:
+      - ./tungwong-auth-management-api/uploads:/app/uploads
+    restart: unless-stopped
+
+  # User Management API
+  user-api:
+    build:
+      context: ./tungwong-user-management-api
+      dockerfile: Dockerfile
+    image: tungwong-user-management-api:latest
+    container_name: tungwong-user-api
+    ports:
+      - "3001:3001"
+    networks:
+      - tungwong-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-api:
+        condition: service_started
+    environment:
+      - PORT=3001
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=${DB_NAME:-tungwong_db}
+      - AUTH_VERIFY_URL=http://auth-api:3000/api/auth/verify
+      - UPLOAD_SERVICE_URL=http://upload-api:3002/api/uploads
+    env_file:
+      - ./tungwong-user-management-api/.env
+    volumes:
+      - ./tungwong-user-management-api/uploads:/app/uploads
+    restart: unless-stopped
+
+  # Upload Management API
+  upload-api:
+    build:
+      context: ./tungwong_upload_management_api
+      dockerfile: Dockerfile
+    image: tungwong-upload-management-api:latest
+    container_name: tungwong-upload-api
+    ports:
+      - "3002:3002"
+    networks:
+      - tungwong-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-api:
+        condition: service_started
+    environment:
+      - PORT=3002
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=${DB_NAME:-tungwong_db}
+      - AUTH_VERIFY_URL=http://auth-api:3000/api/auth/verify
+    env_file:
+      - ./tungwong_upload_management_api/.env
+    volumes:
+      - ./tungwong_upload_management_api/uploads:/app/uploads
+    restart: unless-stopped
+
+  # NATS JetStream for Message Queue
+  nats:
+    image: nats:latest
+    container_name: tungwong-nats
+    command: 
+      - "-js"
+      - "-sd"
+      - "/data"
+      - "-m"
+      - "8222"
+    ports:
+      - "4222:4222"  # Client connections
+      - "8222:8222"  # HTTP monitoring
+      - "6222:6222"  # Cluster connections
+    networks:
+      - tungwong-network
+    volumes:
+      - nats_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Nginx Reverse Proxy
+  nginx:
+    image: nginx:alpine
+    container_name: tungwong-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - tungwong-network
+    depends_on:
+      - auth-api
+      - user-api
+      - upload-api
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    restart: unless-stopped
+
+volumes:
+  db_data:
+    driver: local
+  nats_data:
+    driver: local
+
+networks:
+  tungwong-network:
+    driver: bridge
