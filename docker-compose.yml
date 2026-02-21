@@ -111,6 +111,79 @@ services:
       - ./tungwong_upload_management_api/uploads:/app/uploads
     restart: unless-stopped
 
+  # Video Management API
+  video-api:
+    build:
+      context: .
+      dockerfile: ./tungwong-video-management-api/Dockerfile
+    image: tungwong-video-management-api:latest
+    container_name: tungwong-video-api
+    ports:
+      - "3003:3003"
+      - "50051:50051"  # gRPC port
+    networks:
+      - tungwong-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth-api:
+        condition: service_started
+      nats:
+        condition: service_healthy
+    environment:
+      - PORT=3003
+      - GRPC_PORT=50051
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=${DB_USER:-postgres}
+      - DB_PASSWORD=${DB_PASSWORD:-postgres}
+      - DB_NAME=${DB_NAME:-tungwong_db}
+      - AUTH_VERIFY_URL=http://auth-api:3000/api/auth/verify
+      - NATS_URL=nats://nats:4222
+      - NATS_STREAM=VIDEO_PROCESSING
+      - NATS_SUBJECT=video.process
+    volumes:
+      - ./tungwong-video-management-api/uploads/videos:/app/uploads/videos
+      - ./tungwong-video-management-api/outputs:/app/outputs
+    restart: unless-stopped
+
+  # Video Worker (FFmpeg Encoder)
+  video-worker:
+    build:
+      context: ./tungwong-video-worker
+      dockerfile: Dockerfile
+    image: tungwong-video-worker:latest
+    container_name: tungwong-video-worker
+    networks:
+      - tungwong-network
+    depends_on:
+      nats:
+        condition: service_healthy
+      video-api:
+        condition: service_started
+    environment:
+      - NATS_URL=nats://nats:4222
+      - NATS_STREAM=VIDEO_PROCESSING
+      - NATS_SUBJECT=video.process
+      - NATS_CONSUMER=video-worker-group
+      - NATS_DURABLE=video-worker
+      - VIDEO_MANAGEMENT_GRPC_URL=video-api:50051
+      - WORKER_ID=worker-1
+      - MAX_CONCURRENT_JOBS=3
+      - FFMPEG_HLS_TIME=10
+      - FFMPEG_PRESET=medium
+      - FFMPEG_CRF=23
+      - INPUT_VIDEO_PATH=/app/uploads/videos
+      - OUTPUT_HLS_PATH=/app/outputs/hls
+      - OUTPUT_THUMBNAIL_PATH=/app/outputs/thumbnails
+      - MAX_RETRIES=3
+      - RETRY_BACKOFF_SECONDS=60
+      - LOG_LEVEL=info
+    volumes:
+      - ./tungwong-video-management-api/uploads/videos:/app/uploads/videos
+      - ./tungwong-video-management-api/outputs:/app/outputs
+    restart: unless-stopped
+
   # NATS JetStream for Message Queue
   nats:
     image: nats:latest
@@ -131,7 +204,7 @@ services:
       - nats_data:/data
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      test: ["CMD", "nats", "server", "check", "jetstream"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -149,15 +222,22 @@ services:
       - auth-api
       - user-api
       - upload-api
+      - video-api
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
       - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./tungwong-video-management-api/outputs/hls:/var/www/hls:ro
+      - ./tungwong-video-management-api/outputs/thumbnails:/var/www/thumbnails:ro
     restart: unless-stopped
 
 volumes:
   db_data:
     driver: local
   nats_data:
+    driver: local
+  video_uploads:
+    driver: local
+  video_outputs:
     driver: local
 
 networks:
